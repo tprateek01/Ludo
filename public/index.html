@@ -28,16 +28,16 @@ button.alt{background:var(--line);color:var(--ink)}button:disabled{opacity:.45;c
 #dice{width:64px;height:64px;font-size:34px;background:#fff;color:#000;border:2px solid var(--ink);border-radius:12px;display:flex;align-items:center;justify-content:center}
 #status{font-weight:600}
 </style></head><body><div id="app"><h1>🎲 Ludo with Friends</h1><p class="sub">Online multiplayer · 2 to 6 players</p><div id="main">Loading…</div></div>
+<script src="peerjs.min.js"></script>
 <script>
 const N=54,COLORS=["red","green","yellow","blue","purple","orange"];
 const HEX={red:"#e5483f",green:"#2fa64a",yellow:"#f2b705",blue:"#2b72d6",purple:"#8e4fc9",orange:"#f08a24"};
-const RING_LAST=52,FINISH=58,RING_R=42,STEP=4.6;
+const RING_R=42,STEP=4.6;
 const ang=j=>(-90+j*360/N)*Math.PI/180;
 const pt=(r,a)=>[50+r*Math.cos(a),50+r*Math.sin(a)];
-const sec=c=>COLORS.indexOf(c), isSafe=j=>j%9===0||j%9===5;
+const sec=c=>COLORS.indexOf(c);
 const $=s=>document.querySelector(s), main=$("#main");
-let me,room=null,state=null,nick="",ver=0,timer=null,passV=0;
-
+let me,room=null,state=null,nick="",ver=0,passV=0;
 function cellOf(col,p,i){
   const k=sec(col);
   if(p<0){const [x,y]=pt(27,ang(9*k+2.5));return [x+(i%2?2.7:-2.7),y+(i>1?2.7:-2.7)]}
@@ -45,44 +45,170 @@ function cellOf(col,p,i){
   if(p<FINISH)return pt(RING_R-STEP*(p-RING_LAST),ang((9*k-2+N)%N));
   return pt(6.5,ang(9*k+2.5));
 }
-function legal(col,d){const o=[];state.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=FINISH)o.push(i)});return o}
+function legal(col,d){return legalMoves(state,col,d)}
 const cur=()=>state.players[state.turn];
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-async function api(body){const r=await fetch("/api/game",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body,room,pid:me})});return r.json()}
-let gid=null,exitG=null,exitI=null;
+//LOGIC-START
+const MAXP=6,FINISH=58,RING_LAST=52,RING=54;
+const SEATS={2:[0,3],3:[0,2,4],4:[0,1,3,4],5:[0,1,2,3,4],6:[0,1,2,3,4,5]};
+const START=c=>9*COLORS.indexOf(c), isSafeAbs=a=>a%9===0||a%9===5;
+const cleanName=x=>String(x||"").slice(0,14).replace(/[<>&"]/g,"");
+function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,msg:""}}
+function legalMoves(s,col,d){const o=[];s.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=FINISH)o.push(i)});return o}
+function startGame(s){
+  s.players.forEach((p,i)=>p.color=COLORS[SEATS[s.players.length][i]]);
+  s.pos={};s.players.forEach(p=>s.pos[p.color]=[-1,-1,-1,-1]);
+  s.status="play";s.turn=0;s.dice=null;s.msg="Roll the dice!";
+}
+function nextTurn(s){const n=s.players.length;for(let k=0;k<n;k++){s.turn=(s.turn+1)%n;if(!s.players[s.turn].left)break}}
+function afterLeave(s){
+  if(s.status!=="play")return;
+  const alive=s.players.filter(p=>!p.left);
+  if(alive.length<=1){s.status="done";s.dice=null;s.turn=Math.max(0,s.players.indexOf(alive[0]));s.msg="Everyone else left the game";return}
+  if(s.players[s.turn].left){s.dice=null;nextTurn(s)}
+}
+// Applies one action to room state s. Returns {error} or {changed}.
+function applyAction(s,b){
+  const cur=s.players[s.turn],member=s.players.find(p=>p.id===b.pid);
+  switch(b.type){
+    case "join":
+      if(member){member.left=false;if(b.name&&s.status==="lobby")member.name=cleanName(b.name)||member.name;return {changed:true}}
+      if(s.status!=="lobby")return {error:"That game already started."};
+      if(s.players.length>=s.max)return {error:`Room is full (${s.max}-player game).`};
+      s.players.push({id:b.pid,name:cleanName(b.name)||"Player"});
+      if(s.players.length===s.max)startGame(s);
+      return {changed:true};
+    case "leave":
+      if(!member)return {changed:false};
+      if(s.status==="lobby"){s.players=s.players.filter(p=>p.id!==b.pid)}
+      else{member.left=true;afterLeave(s)}
+      return {changed:true};
+    case "setmax":{
+      const m=Number(b.max);
+      if(s.host!==b.pid||s.status!=="lobby"||!(m>=2&&m<=MAXP)||m<s.players.length)return {error:"Cannot change player count"};
+      s.max=m;if(s.players.length===s.max)startGame(s);
+      return {changed:true};
+    }
+    case "roll":{
+      if(s.status!=="play"||cur.id!==b.pid||s.dice)return {error:"Not your roll"};
+      const d=1+Math.floor(Math.random()*6);s.dice=d;
+      s.msg=legalMoves(s,cur.color,d).length?`${cur.name} rolled ${d}`:`${cur.name} rolled ${d} — no moves`;
+      return {changed:true};
+    }
+    case "pass":
+      if(!member||s.status!=="play"||!s.dice||legalMoves(s,cur.color,s.dice).length||(b.v!==undefined&&b.v!==s.v))return {changed:false};
+      s.dice=null;nextTurn(s);s.msg="";return {changed:true};
+    case "move":{
+      const d=s.dice,i=b.i;
+      if(s.status!=="play"||cur.id!==b.pid||!d||!legalMoves(s,cur.color,d).includes(i))return {error:"Illegal move"};
+      const p=s.pos[cur.color][i],np=p<0?0:p+d;s.pos[cur.color][i]=np;
+      let cap=false,msg=`${cur.name} moved`;
+      if(np<=RING_LAST){
+        const abs=(START(cur.color)+np)%RING;
+        if(!isSafeAbs(abs))for(const o of s.players){
+          if(o.color===cur.color)continue;
+          s.pos[o.color]=s.pos[o.color].map(q=>(q>=0&&q<=RING_LAST&&(START(o.color)+q)%RING===abs)?(cap=true,-1):q);
+        }
+      }
+      if(cap)msg=`${cur.name} captured a token! 💥`;
+      if(np===FINISH)msg=`${cur.name} got a token home 🏠`;
+      s.dice=null;s.msg=msg;
+      if(s.pos[cur.color].every(x=>x===FINISH)){s.status="done";s.msg=""}
+      else if(!(d===6||cap||np===FINISH))nextTurn(s);
+      return {changed:true};
+    }
+  }
+  return {error:"Unknown action"};
+}
+//LOGIC-END
+
+// ---------- networking (peer-to-peer; the host's browser holds the game) ----------
+const siteKey=(()=>{let h=0;for(const ch of location.host)h=(h*31+ch.charCodeAt(0))>>>0;return h.toString(36)})();
+const hostId=code=>`ludo-${siteKey}-${code}`;
+let gid=null,exitG=null,exitI=null,sess=null;
 const apply=r=>{if(r&&r.state){if(gid&&r.state.gid!==gid)return goHome();gid=r.state.gid;state=r.state;ver=state.v;render()}};
 function goHome(msg){
-  clearInterval(timer);clearInterval(exitI);exitG=null;gid=null;state=null;room=null;ver=0;
+  clearInterval(exitI);exitG=null;gid=null;state=null;ver=0;
+  const s=sess;sess=null;room=null;
+  try{if(s){if(s.conn)s.conn.close();if(s.peer)s.peer.destroy()}}catch(e){}
   localStorage.removeItem("ludo-room");lobby(msg);
 }
 function startExit(){
   if(exitG===state.gid)return;exitG=state.gid;let n=8;
   exitI=setInterval(()=>{const el=$("#cd");if(el)el.textContent=--n;if(n<=0)goHome()},1000);
 }
-
+function send(b){
+  if(!sess)return;
+  const m={...b,pid:me,name:nick};
+  if(sess.isHost)hostAct(m,null);
+  else if(sess.conn&&sess.conn.open)sess.conn.send(m);
+}
+const api=b=>{send(b);return Promise.resolve()};
+function commit(){
+  const s=sess.s;s.v++;
+  sess.conns.forEach(c=>{try{c.send({state:s})}catch(e){}});
+  apply({state:s});
+}
+function hostAct(b,conn){
+  const s=sess.s,r=applyAction(s,b);
+  if(r.error){if(conn)conn.send({error:r.error});return}
+  if(conn&&b.type==="join"){conn.pid=b.pid;sess.conns.set(b.pid,conn)}
+  if(r.changed)commit();
+}
+function enter(code){
+  room=code;main.innerHTML=`<div class="card">Connecting…</div>`;
+  const my={isHost:true,conns:new Map(),s:null,opened:false};sess=my;
+  const peer=new Peer(hostId(code),{debug:0});my.peer=peer;
+  const t=setTimeout(()=>{if(sess===my&&!my.opened)goHome("Could not reach the connection server. Check your internet and try again.")},12000);
+  peer.on("open",()=>{
+    if(sess!==my)return;my.opened=true;clearTimeout(t);
+    my.s=newRoom(me,nick);gid=null;localStorage.setItem("ludo-nick",nick);apply({state:my.s});
+  });
+  peer.on("connection",conn=>{
+    conn.on("data",b=>{if(sess===my&&b&&b.type)hostAct(b,conn)});
+    conn.on("close",()=>{
+      if(sess!==my||!conn.pid||my.conns.get(conn.pid)!==conn)return;
+      my.conns.delete(conn.pid);
+      const r=applyAction(my.s,{type:"leave",pid:conn.pid});if(r.changed)commit();
+    });
+  });
+  peer.on("disconnected",()=>{if(sess===my){try{peer.reconnect()}catch(e){}}});
+  peer.on("error",e=>{
+    if(sess!==my)return;
+    if(e.type==="unavailable-id"){clearTimeout(t);try{peer.destroy()}catch(x){}joinAsClient(code)}
+    else if(!my.opened){clearTimeout(t);goHome("Connection problem ("+e.type+"). Please try again.")}
+  });
+}
+function joinAsClient(code,quiet){
+  room=code;main.innerHTML=`<div class="card">Joining room ${code}…</div>`;
+  const my={isHost:false,conn:null,got:false};sess=my;
+  const fail=m=>{if(sess===my)goHome(quiet?undefined:m)};
+  const t=setTimeout(()=>fail("Couldn't reach the room. Check the code and try again."),10000);
+  const peer=new Peer({debug:0});my.peer=peer;
+  peer.on("error",e=>{clearTimeout(t);fail(e.type==="peer-unavailable"?"Room not found — it may have ended.":"Connection problem ("+e.type+").")});
+  peer.on("open",()=>{
+    if(sess!==my)return;
+    const conn=peer.connect(hostId(code),{reliable:true,serialization:"json"});my.conn=conn;
+    conn.on("open",()=>{if(sess!==my)return;clearTimeout(t);conn.send({type:"join",pid:me,name:nick})});
+    conn.on("data",m=>{
+      if(sess!==my)return;
+      if(m.error){if(!my.got)fail(m.error);return}
+      if(m.state){my.got=true;localStorage.setItem("ludo-room",code);localStorage.setItem("ludo-nick",nick);apply(m)}
+    });
+    conn.on("close",()=>{if(sess!==my)return;if(state&&state.status==="done")return;fail("The host left, so the room closed.")});
+  });
+}
 function lobby(msg){
   main.innerHTML=`<div class="card"><label>Your nickname</label><input id="nn" maxlength="14" placeholder="e.g. Aman" value="${esc(nick)}">
   <label style="display:block;margin-top:10px">Room code (1000 – 9999)</label>
   <div class="row"><input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="e.g. 4821" style="flex:1;font-size:22px;letter-spacing:4px"><button id="rnd" class="alt" title="Random code">🎲</button></div>
-  <p class="sub" style="margin:6px 0 10px">Everyone who enters the same code lands in the same room. If nobody has used the code yet, you create the room and choose how many players (2–6).</p>
+  <p class="sub" style="margin:6px 0 10px">Everyone who enters the same code lands in the same room. The first person to use a code becomes the host and chooses how many players (2–6). Keep the host's tab open during the game.</p>
   <button id="go" style="width:100%">Join / create room</button>
   <p style="color:#e5483f;margin-bottom:0">${msg||""}</p></div>`;
   const nm=()=>(nick=$("#nn").value.trim()||"Player");
   $("#code").oninput=e=>e.target.value=e.target.value.replace(/\D/g,"").slice(0,4);
   $("#rnd").onclick=()=>$("#code").value=1000+Math.floor(Math.random()*9000);
-  $("#go").onclick=()=>{nm();const c=$("#code").value.trim();/^[1-9]\d{3}$/.test(c)?open(c,"enter"):lobby("Enter a number from 1000 to 9999.")};
-}
-async function open(code,mode){
-  room=code;let r;
-  try{r=await api({type:mode||"join",name:nick})}catch(e){return lobby("Could not reach the server.")}
-  if(r.error){localStorage.removeItem("ludo-room");return lobby(r.error)}
-  room=r.room;localStorage.setItem("ludo-room",room);localStorage.setItem("ludo-nick",nick);
-  gid=null;apply(r);clearInterval(timer);
-  timer=setInterval(async()=>{
-    try{const x=await fetch("/api/game?room="+room+"&v="+ver,{cache:"no-store"});
-      if(x.status===404){clearInterval(timer);localStorage.removeItem("ludo-room");return lobby("Room expired.")}
-      apply(await x.json())}catch(e){}
-  },1000);
+  $("#go").onclick=()=>{nm();const c=$("#code").value.trim();/^[1-9]\d{3}$/.test(c)?enter(c):lobby("Enter a number from 1000 to 9999.")};
 }
 function render(){
   if(!state)return;
@@ -93,7 +219,7 @@ function render(){
 function maybePass(){
   if(state.status==="play"&&state.dice&&!legal(cur().color,state.dice).length&&passV!==state.v){
     passV=state.v;const v=state.v;
-    setTimeout(()=>{if(state&&state.v===v)api({type:"pass"}).then(apply)},1400)}
+    setTimeout(()=>{if(state&&state.v===v)send({type:"pass",v})},1400)}
 }
 function renderLobby(){
   const host=state.host===me,n=state.players.length,m=state.max;
@@ -132,7 +258,7 @@ function renderGame(){
     <div><div id="status">${state.status==="done"?"🏆 "+esc(c.name)+" wins!":myTurn?"Your turn":esc(c.name)+"'s turn"}</div><div class="sub" style="margin:2px 0 0">${state.status==="done"?`Back to the home screen in <b id="cd">8</b>s — the room code is free to reuse.`:esc(state.msg||"")}</div></div>
     <div class="row"><div id="dice">${state.dice?["","⚀","⚁","⚂","⚃","⚄","⚅"][state.dice]:"?"}</div>
     <button id="roll" ${myTurn&&!state.dice?"":"disabled"}>Roll</button></div></div>
-  <div style="margin-top:10px">${state.players.map(p=>`<span class="pl" style="display:inline-flex;margin-right:12px"><span class="dot" style="background:${HEX[p.color]}"></span>${esc(p.name)}${p.id===me?" (you)":""}${p.id===c.id&&state.status==="play"?" ◀":""} · ${done(p)}/4</span>`).join("")}</div>
+  <div style="margin-top:10px">${state.players.map(p=>`<span class="pl" style="display:inline-flex;margin-right:12px"><span class="dot" style="background:${HEX[p.color]}"></span>${esc(p.name)}${p.id===me?" (you)":""}${p.left?" (left)":""}${p.id===c.id&&state.status==="play"?" ◀":""} · ${done(p)}/4</span>`).join("")}</div>
   <p class="sub" style="margin:8px 0 0">Room ${room} · roll a 6 to leave the yard · ★ and coloured start squares are safe</p></div>
   ${state.status==="done"?`<button id="home">Back to home now</button>`:""}`;
   main.innerHTML=h;
@@ -144,7 +270,8 @@ function renderGame(){
   me=localStorage.getItem("ludo-pid");
   if(!me){me=(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)+Date.now());localStorage.setItem("ludo-pid",me)}
   nick=localStorage.getItem("ludo-nick")||"";
+  if(typeof Peer==="undefined"){main.innerHTML='<div class="card">Could not load the networking library (peerjs.min.js).</div>';return}
   const saved=localStorage.getItem("ludo-room");
-  saved?open(saved,"join"):lobby();
+  saved?joinAsClient(saved,true):lobby();
 })();
 </script></body></html>
