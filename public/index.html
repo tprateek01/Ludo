@@ -32,7 +32,11 @@ button.alt{background:var(--line);color:var(--ink)}button:disabled{opacity:.45;c
 @keyframes bob{50%{transform:translateY(-7px)}}
 @keyframes tumble{0%{transform:rotate(0) scale(1)}20%{transform:rotate(110deg) scale(1.2) translateY(-12px)}45%{transform:rotate(230deg) scale(1)}70%{transform:rotate(320deg) scale(1.15) translateY(-8px)}100%{transform:rotate(360deg) scale(1)}}
 #status{font-weight:600}
-</style></head><body><div id="app"><h1>🎲 Ludo with Friends</h1><p class="sub">Online multiplayer · 2 to 6 players</p><div id="main">Loading…</div></div>
+#dock{position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));display:flex;justify-content:center;z-index:20;pointer-events:none;margin-top:4px}
+#dock .pill{pointer-events:auto;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:12px 20px;box-shadow:0 6px 20px #0005}
+#toasts{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));left:0;right:0;display:flex;flex-direction:column;align-items:center;gap:6px;z-index:50;pointer-events:none}
+.toast{background:#222;color:#fff;padding:10px 16px;border-radius:12px;font-weight:600;box-shadow:0 4px 14px #0006;max-width:90%}
+</style></head><body><div id="app"><h1>🎲 Ludo with Friends</h1><p class="sub">Online multiplayer · 2 to 6 players</p><div id="main">Loading…</div></div><div id="toasts"></div>
 <script src="peerjs.min.js"></script>
 <script>
 const COLORS=["red","green","yellow","blue","purple","orange"];
@@ -101,15 +105,18 @@ const SEATS={4:{2:[0,2],3:[0,1,3],4:[0,1,2,3]},5:{5:[0,1,2,3,4]},6:{6:[0,1,2,3,4
 const ringOf=s=>13*s.arms,finOf=s=>13*s.arms+4;
 const START=c=>13*COLORS.indexOf(c)+8,isSafeAbs=a=>a%13===3||a%13===8;
 const cleanName=x=>String(x||"").slice(0,14).replace(/[<>&"]/g,"");
-function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,arms:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,sixes:0,skip:false,msg:""}}
+function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,arms:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,sixes:0,skip:false,tries:0,msg:""}}
 function legalMoves(s,col,d){const o=[],f=finOf(s);if(s.skip)return o;s.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=f)o.push(i)});return o}
+// no piece on the track (all in the yard or already home) -> up to 3 tries to roll a 6
+const allYard=(s,col)=>s.pos[col].every(p=>p===-1||p===finOf(s));
+const canRetry=(s,col)=>!s.skip&&(s.tries||0)<3&&allYard(s,col);
 function startGame(s){
   const n=s.players.length;s.arms=n<=4?4:n;const seats=SEATS[s.arms][n];
   s.players.forEach((p,i)=>p.color=COLORS[seats[i]]);
   s.pos={};s.players.forEach(p=>s.pos[p.color]=[-1,-1,-1,-1]);
-  s.status="play";s.turn=0;s.dice=null;s.sixes=0;s.skip=false;s.msg="Roll the dice!";
+  s.status="play";s.turn=0;s.dice=null;s.sixes=0;s.skip=false;s.tries=0;s.msg="Roll the dice!";
 }
-function nextTurn(s){const n=s.players.length;s.sixes=0;s.skip=false;for(let k=0;k<n;k++){s.turn=(s.turn+1)%n;if(!s.players[s.turn].left)break}}
+function nextTurn(s){const n=s.players.length;s.sixes=0;s.skip=false;s.tries=0;for(let k=0;k<n;k++){s.turn=(s.turn+1)%n;if(!s.players[s.turn].left)break}}
 function afterLeave(s){
   if(s.status!=="play")return;
   const alive=s.players.filter(p=>!p.left);
@@ -130,7 +137,7 @@ function applyAction(s,b){
     case "leave":
       if(!member)return {changed:false};
       if(s.status==="lobby"){s.players=s.players.filter(p=>p.id!==b.pid)}
-      else{member.left=true;afterLeave(s)}
+      else{if(member.left)return {changed:false};member.left=true;s.msg=`${member.name} left the game`;afterLeave(s)}
       return {changed:true};
     case "setmax":{
       const m=Number(b.max);
@@ -145,11 +152,13 @@ function applyAction(s,b){
       s.sixes=d===6?(s.sixes||0)+1:0;
       s.skip=s.sixes>=3;
       if(s.skip&&s.snap)s.pos[cur.color]=[...s.snap]; // three 6s: undo moves made with this streak
-      s.msg=s.skip?`${cur.name} rolled three 6s in a row — moves undone, turn skipped`:legalMoves(s,cur.color,d).length?`${cur.name} rolled ${d}`:`${cur.name} rolled ${d} — no moves`;
+      s.tries=allYard(s,cur.color)?(s.tries||0)+1:0;
+      s.msg=s.skip?`${cur.name} rolled three 6s in a row — moves undone, turn skipped`:legalMoves(s,cur.color,d).length?`${cur.name} rolled ${d}`:canRetry(s,cur.color)?`${cur.name} rolled ${d} — no 6, try ${s.tries} of 3`:`${cur.name} rolled ${d} — no moves`;
       return {changed:true};
     }
     case "pass":
       if(!member||s.status!=="play"||!s.dice||legalMoves(s,cur.color,s.dice).length||(b.v!==undefined&&b.v!==s.v))return {changed:false};
+      if(canRetry(s,cur.color)){s.dice=null;s.msg=`${cur.name} gets another try (${s.tries} of 3 used)`;return {changed:true}}
       s.dice=null;nextTurn(s);s.msg="";return {changed:true};
     case "move":{
       const d=s.dice,i=b.i,RING=ringOf(s),FIN=finOf(s);
@@ -159,7 +168,7 @@ function applyAction(s,b){
       if(np<=RING-2){
         const abs=(START(cur.color)+np)%RING;
         if(!isSafeAbs(abs))for(const o of s.players){
-          if(o.color===cur.color)continue;
+          if(o.color===cur.color||o.left)continue;
           s.pos[o.color]=s.pos[o.color].map(q=>(q>=0&&q<=RING-2&&(START(o.color)+q)%RING===abs)?(cap=true,-1):q);
         }
       }
@@ -179,9 +188,17 @@ function applyAction(s,b){
 const siteKey=(()=>{let h=0;for(const ch of location.host)h=(h*31+ch.charCodeAt(0))>>>0;return h.toString(36)})();
 const hostId=code=>`ludo-${siteKey}-${code}`;
 let gid=null,exitG=null,exitI=null,sess=null;
-const apply=r=>{if(r&&r.state){if(gid&&r.state.gid!==gid)return goHome();gid=r.state.gid;state=r.state;ver=state.v;render()}};
+const leftSeen=new Set();
+function toast(t){const el=document.createElement("div");el.className="toast";el.textContent=t;$("#toasts").appendChild(el);setTimeout(()=>el.remove(),4000)}
+function noteLeavers(st){
+  if(st.status==="lobby")return;
+  st.players.forEach(p=>{const k=st.gid+p.id;
+    if(!p.left)leftSeen.delete(k);
+    else if(!leftSeen.has(k)){leftSeen.add(k);if(p.id!==me)toast(`🚪 ${p.name} left the room`)}});
+}
+const apply=r=>{if(r&&r.state){if(gid&&r.state.gid!==gid)return goHome();gid=r.state.gid;noteLeavers(r.state);state=r.state;ver=state.v;render()}};
 function goHome(msg){
-  clearInterval(exitI);exitG=null;gid=null;state=null;ver=0;prevDice=null;tokPos={};
+  clearInterval(exitI);leftSeen.clear();exitG=null;gid=null;state=null;ver=0;prevDice=null;tokPos={};
   const s=sess;sess=null;room=null;
   try{if(s){if(s.conn)s.conn.close();if(s.peer)s.peer.destroy()}}catch(e){}
   localStorage.removeItem("ludo-room");lobby(msg);
@@ -301,7 +318,7 @@ function renderLobby(){
 }
 const PIPS={1:[4],2:[0,8],3:[0,4,8],4:[0,2,6,8],5:[0,2,4,6,8],6:[0,2,3,5,6,8]};
 const faceHTML=v=>Array.from({length:9},(_,i)=>`<i class="${PIPS[v].includes(i)?"on":""}"></i>`).join("");
-let prevDice=null,tokPos={};
+let prevDice=null,lastDie=1,tokPos={};
 function animateDie(el,final){
   el.classList.add("rolling");let t=0;
   const iv=setInterval(()=>{
@@ -318,7 +335,7 @@ function renderGame(){
   const canMove=myTurn&&state.dice?legal(c.color,state.dice):null;
   // group pieces sharing a cell so they sit side by side instead of hiding each other
   const items=[],groups={};
-  for(const pl of state.players)state.pos[pl.color].forEach((p,i)=>{
+  for(const pl of state.players)if(!pl.left)state.pos[pl.color].forEach((p,i)=>{
     const [x,y]=cellOf(n,pl.color,p,i),key=x.toFixed(1)+","+y.toFixed(1);
     (groups[key]=groups[key]||[]).push(items.length);items.push({pl,i,x,y,key});
   });
@@ -331,16 +348,18 @@ function renderGame(){
     it.size=cnt===1?56:cnt===2?44:38;
     it.go=canMove&&it.pl.id===me&&canMove.includes(it.i)&&new Set(canMove.map(j=>state.pos[it.pl.color][j])).size>1;
     h+=`<div class="tok ${it.go?"go":""}" data-k="${it.pl.color}${it.i}" data-i="${it.i}" data-x="${it.fx}" data-y="${it.fy}" style="left:${it.fx}%;top:${it.fy}%;width:${tk}%;height:${tk}%;transform:translate(-50%,-50%)"><b style="width:${it.size}%;height:${it.size}%;background:radial-gradient(circle at 35% 30%,#ffffff99,#fff0 55%),${HEX[it.pl.color]}"></b></div>`});
-  const hint=state.status==="done"?"":myTurn?(state.dice?(state.skip?"Three 6s in a row — moves undone, turn skipped…":canMove&&canMove.length?(new Set(canMove.map(i=>state.pos[c.color][i])).size===1?"Moving automatically…":"Tap a glowing piece to move it"):"No moves — skipping…"):"Tap the dice to roll!"):"";
-  const dieCls=`die${state.dice?"":" blank"}${myTurn&&!state.dice?" mine":""}`;
+  const hint=state.status==="done"?"":myTurn?(state.dice?(state.skip?"Three 6s in a row — moves undone, turn skipped…":canMove&&canMove.length?(new Set(canMove.map(i=>state.pos[c.color][i])).size===1?"Moving automatically…":"Tap a glowing piece to move it"):canRetry(state,c.color)?"No 6 — roll again (up to 3 tries)":"No moves — skipping…"):"Tap the dice to roll!"):"";
+  if(state.dice)lastDie=state.dice;
+  const dieCls=`die${myTurn&&!state.dice?" mine":""}`;
   h+=`</div></div><div class="card"><div class="row" style="justify-content:space-between;flex-wrap:nowrap">
     <div><div id="status">${state.status==="done"?"🏆 "+esc(c.name)+" wins!":myTurn?"Your turn":esc(c.name)+"'s turn"}</div>
     <div class="sub" style="margin:2px 0 0">${state.status==="done"?`Back to the home screen in <b id="cd">8</b>s — the room code is free to reuse.`:esc(state.msg||"")}</div>
-    ${hint?`<div style="margin-top:6px;font-weight:600;color:#2b72d6">${hint}</div>`:""}</div>
-    <div id="dice" class="${dieCls}" ${myTurn&&!state.dice?'role="button" tabindex="0" aria-label="Roll the dice"':""}>${state.dice?faceHTML(state.dice):"?"}</div></div>
+    ${hint?`<div style="margin-top:6px;font-weight:600;color:#2b72d6">${hint}</div>`:""}</div></div>
   <div style="margin-top:10px">${state.players.map(p=>`<span class="pl" style="display:inline-flex;margin-right:12px"><span class="dot" style="background:${HEX[p.color]}"></span>${esc(p.name)}${p.id===me?" (you)":""}${p.left?" (left)":""}${p.id===c.id&&state.status==="play"?" ◀":""} · ${done(p)}/4</span>`).join("")}</div>
   <p class="sub" style="margin:8px 0 0">Room ${room} · roll a 6 to leave the yard · ★ and coloured start squares are safe</p></div>
-  ${state.status==="done"?`<button id="home">Back to home now</button>`:""}`;
+  ${state.status==="play"?`<button class="alt" id="leave" style="width:100%;margin-bottom:12px">Leave room</button>`:""}
+  ${state.status==="done"?`<button id="home">Back to home now</button>`:""}
+  ${myTurn?`<div id="dock"><div class="pill"><div id="dice" class="${dieCls}" role="button" tabindex="0" aria-label="Roll the dice">${faceHTML(state.dice||lastDie)}</div></div></div>`:""}`;
   main.innerHTML=h;
   // glide pieces from where they were to where they are now
   document.querySelectorAll(".tok").forEach(el=>{
@@ -349,12 +368,17 @@ function renderGame(){
     tokPos[k]=[x,y];
   });
   const die=$("#dice");
-  if(state.dice&&!prevDice)animateDie(die,state.dice);
+  if(state.dice&&!prevDice&&die)animateDie(die,state.dice);
   prevDice=state.dice;
   const roll=()=>{if(myTurn&&!state.dice){die.classList.remove("mine");die.classList.add("rolling");send({type:"roll"})}};
   if(myTurn&&!state.dice){die.onclick=roll;die.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();roll()}}}
   document.querySelectorAll(".tok.go").forEach(t=>t.onclick=()=>send({type:"move",i:+t.dataset.i}));
   if($("#home"))$("#home").onclick=()=>goHome();
+  if($("#leave"))$("#leave").onclick=()=>{
+    const host=sess&&sess.isHost;
+    if(!confirm(host?"You are the host — leaving ends the game for everyone. Leave?":"Leave the game? The other players will see that you left."))return;
+    if(host)goHome();else{send({type:"leave"});setTimeout(()=>goHome(),300)}
+  };
 }
 (()=>{
   me=localStorage.getItem("ludo-pid");
