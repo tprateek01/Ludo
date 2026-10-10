@@ -34,6 +34,10 @@ button.alt{background:var(--line);color:var(--ink)}button:disabled{opacity:.45;c
 #status{font-weight:600}
 #dock{position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));display:flex;justify-content:center;z-index:20;pointer-events:none;margin-top:4px}
 #dock .pill{pointer-events:auto;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:12px 20px;box-shadow:0 6px 20px #0005}
+@media (min-width:900px){
+  #dock{position:fixed;bottom:auto;top:50%;left:calc(50% + 330px);transform:translateY(-50%);margin:0}
+  #dock .pill{padding:18px 22px}
+}
 #toasts{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));left:0;right:0;display:flex;flex-direction:column;align-items:center;gap:6px;z-index:50;pointer-events:none}
 .toast{background:#222;color:#fff;padding:10px 16px;border-radius:12px;font-weight:600;box-shadow:0 4px 14px #0006;max-width:90%}
 </style></head><body><div id="app"><h1>🎲 Ludo with Friends</h1><p class="sub">Online multiplayer · 2 to 6 players</p><div id="main">Loading…</div></div><div id="toasts"></div>
@@ -105,18 +109,15 @@ const SEATS={4:{2:[0,2],3:[0,1,3],4:[0,1,2,3]},5:{5:[0,1,2,3,4]},6:{6:[0,1,2,3,4
 const ringOf=s=>13*s.arms,finOf=s=>13*s.arms+4;
 const START=c=>13*COLORS.indexOf(c)+8,isSafeAbs=a=>a%13===3||a%13===8;
 const cleanName=x=>String(x||"").slice(0,14).replace(/[<>&"]/g,"");
-function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,arms:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,sixes:0,skip:false,tries:0,msg:""}}
+function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,arms:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,sixes:0,skip:false,msg:""}}
 function legalMoves(s,col,d){const o=[],f=finOf(s);if(s.skip)return o;s.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=f)o.push(i)});return o}
-// no piece on the track (all in the yard or already home) -> up to 3 tries to roll a 6
-const allYard=(s,col)=>s.pos[col].every(p=>p===-1||p===finOf(s));
-const canRetry=(s,col)=>!s.skip&&(s.tries||0)<3&&allYard(s,col);
 function startGame(s){
   const n=s.players.length;s.arms=n<=4?4:n;const seats=SEATS[s.arms][n];
   s.players.forEach((p,i)=>p.color=COLORS[seats[i]]);
   s.pos={};s.players.forEach(p=>s.pos[p.color]=[-1,-1,-1,-1]);
-  s.status="play";s.turn=0;s.dice=null;s.sixes=0;s.skip=false;s.tries=0;s.msg="Roll the dice!";
+  s.status="play";s.turn=0;s.dice=null;s.sixes=0;s.skip=false;s.msg="Roll the dice!";
 }
-function nextTurn(s){const n=s.players.length;s.sixes=0;s.skip=false;s.tries=0;for(let k=0;k<n;k++){s.turn=(s.turn+1)%n;if(!s.players[s.turn].left)break}}
+function nextTurn(s){const n=s.players.length;s.sixes=0;s.skip=false;for(let k=0;k<n;k++){s.turn=(s.turn+1)%n;if(!s.players[s.turn].left)break}}
 function afterLeave(s){
   if(s.status!=="play")return;
   const alive=s.players.filter(p=>!p.left);
@@ -152,13 +153,11 @@ function applyAction(s,b){
       s.sixes=d===6?(s.sixes||0)+1:0;
       s.skip=s.sixes>=3;
       if(s.skip&&s.snap)s.pos[cur.color]=[...s.snap]; // three 6s: undo moves made with this streak
-      s.tries=allYard(s,cur.color)?(s.tries||0)+1:0;
-      s.msg=s.skip?`${cur.name} rolled three 6s in a row — moves undone, turn skipped`:legalMoves(s,cur.color,d).length?`${cur.name} rolled ${d}`:canRetry(s,cur.color)?`${cur.name} rolled ${d} — no 6, try ${s.tries} of 3`:`${cur.name} rolled ${d} — no moves`;
+      s.msg=s.skip?`${cur.name} rolled three 6s in a row — moves undone, turn skipped`:legalMoves(s,cur.color,d).length?`${cur.name} rolled ${d}`:`${cur.name} rolled ${d} — no moves`;
       return {changed:true};
     }
     case "pass":
       if(!member||s.status!=="play"||!s.dice||legalMoves(s,cur.color,s.dice).length||(b.v!==undefined&&b.v!==s.v))return {changed:false};
-      if(canRetry(s,cur.color)){s.dice=null;s.msg=`${cur.name} gets another try (${s.tries} of 3 used)`;return {changed:true}}
       s.dice=null;nextTurn(s);s.msg="";return {changed:true};
     case "move":{
       const d=s.dice,i=b.i,RING=ringOf(s),FIN=finOf(s);
@@ -348,7 +347,7 @@ function renderGame(){
     it.size=cnt===1?56:cnt===2?44:38;
     it.go=canMove&&it.pl.id===me&&canMove.includes(it.i)&&new Set(canMove.map(j=>state.pos[it.pl.color][j])).size>1;
     h+=`<div class="tok ${it.go?"go":""}" data-k="${it.pl.color}${it.i}" data-i="${it.i}" data-x="${it.fx}" data-y="${it.fy}" style="left:${it.fx}%;top:${it.fy}%;width:${tk}%;height:${tk}%;transform:translate(-50%,-50%)"><b style="width:${it.size}%;height:${it.size}%;background:radial-gradient(circle at 35% 30%,#ffffff99,#fff0 55%),${HEX[it.pl.color]}"></b></div>`});
-  const hint=state.status==="done"?"":myTurn?(state.dice?(state.skip?"Three 6s in a row — moves undone, turn skipped…":canMove&&canMove.length?(new Set(canMove.map(i=>state.pos[c.color][i])).size===1?"Moving automatically…":"Tap a glowing piece to move it"):canRetry(state,c.color)?"No 6 — roll again (up to 3 tries)":"No moves — skipping…"):"Tap the dice to roll!"):"";
+  const hint=state.status==="done"?"":myTurn?(state.dice?(state.skip?"Three 6s in a row — moves undone, turn skipped…":canMove&&canMove.length?(new Set(canMove.map(i=>state.pos[c.color][i])).size===1?"Moving automatically…":"Tap a glowing piece to move it"):"No moves — skipping…"):"Tap the dice to roll!"):"";
   if(state.dice)lastDie=state.dice;
   const dieCls=`die${myTurn&&!state.dice?" mine":""}`;
   h+=`</div></div><div class="card"><div class="row" style="justify-content:space-between;flex-wrap:nowrap">
