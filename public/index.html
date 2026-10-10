@@ -16,13 +16,10 @@ button{font:inherit;font-weight:600;padding:10px 16px;border-radius:10px;border:
 button.alt{background:var(--line);color:var(--ink)}button:disabled{opacity:.45;cursor:default}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .pl{display:flex;align-items:center;gap:8px;padding:5px 0}.dot{width:14px;height:14px;border-radius:50%;background:#aaa;flex:none}
-#board{position:relative;width:100%;aspect-ratio:1;border-radius:50%;background:var(--disc);border:2px solid var(--line)}
-.c,.yd,.hub{position:absolute;border-radius:50%;transform:translate(-50%,-50%)}
-.c{width:4.2%;height:4.2%;background:#fff;border:1px solid #aaa;display:flex;align-items:center;justify-content:center;font-size:9px;color:#888;line-height:1}
-.yd{width:17%;height:17%;border:2px dashed}
-.hub{width:22%;height:22%;border:2px solid var(--line)}
-.tok{position:absolute;width:7%;height:7%;transition:left .35s,top .35s;display:flex;align-items:center;justify-content:center;z-index:5;pointer-events:none}
-.tok b{width:63%;height:63%;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px #0008}
+#board{position:relative;width:100%;aspect-ratio:1}
+#bsvg{position:absolute;inset:0;width:100%;height:100%;border-radius:12px;box-shadow:0 2px 10px #0003}
+.tok{position:absolute;transition:left .35s,top .35s;display:flex;align-items:center;justify-content:center;z-index:5;pointer-events:none}
+.tok b{width:56%;height:56%;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px #0009}
 .tok.go{pointer-events:auto;cursor:pointer;z-index:9}.tok.go b{animation:p .7s infinite alternate;outline:2px solid #000}
 @keyframes p{to{transform:scale(1.3)}}
 #dice{width:64px;height:64px;font-size:34px;background:#fff;color:#000;border:2px solid var(--ink);border-radius:12px;display:flex;align-items:center;justify-content:center}
@@ -30,33 +27,66 @@ button.alt{background:var(--line);color:var(--ink)}button:disabled{opacity:.45;c
 </style></head><body><div id="app"><h1>🎲 Ludo with Friends</h1><p class="sub">Online multiplayer · 2 to 6 players</p><div id="main">Loading…</div></div>
 <script src="peerjs.min.js"></script>
 <script>
-const N=54,COLORS=["red","green","yellow","blue","purple","orange"];
+const COLORS=["red","green","yellow","blue","purple","orange"];
 const HEX={red:"#e5483f",green:"#2fa64a",yellow:"#f2b705",blue:"#2b72d6",purple:"#8e4fc9",orange:"#f08a24"};
-const RING_R=42,STEP=4.6;
-const ang=j=>(-90+j*360/N)*Math.PI/180;
-const pt=(r,a)=>[50+r*Math.cos(a),50+r*Math.sin(a)];
-const sec=c=>COLORS.indexOf(c);
 const $=s=>document.querySelector(s), main=$("#main");
 let me,room=null,state=null,nick="",ver=0,passV=0;
-function cellOf(col,p,i){
-  const k=sec(col);
-  if(p<0){const [x,y]=pt(27,ang(9*k+2.5));return [x+(i%2?2.7:-2.7),y+(i>1?2.7:-2.7)]}
-  if(p<=RING_LAST)return pt(RING_R,ang((9*k+p)%N));
-  if(p<FINISH)return pt(RING_R-STEP*(p-RING_LAST),ang((9*k-2+N)%N));
-  return pt(6.5,ang(9*k+2.5));
+//GEO-START
+// Board geometry for boards with n arms (4 = classic cross, 5 = pentagon star, 6 = hexagon).
+// Every arm is 3 lanes wide and 6 cells long; units are "u" (one cell). R0 = distance centre -> arm start.
+const GEO={4:{R0:1.5,u:6.27,yd:6.364,yr:3},5:{R0:2.08,u:5.63,yd:6.3,yr:2.05},6:{R0:2.64,u:5.44,yd:6.8,yr:1.8}};
+const sec=c=>COLORS.indexOf(c);
+const thetaOf=(k,n)=>(90+360*k/n)*Math.PI/180;
+function P(n,k,rad,lat){const g=GEO[n],a=thetaOf(k,n);return [50+g.u*(rad*Math.cos(a)-lat*Math.sin(a)),50+g.u*(rad*Math.sin(a)+lat*Math.cos(a))]}
+// ring cell abs (0..13n-1): arm k = floor(abs/13), m = abs%13:  m0-5 outward lane, m6 tip, m7-12 inward lane
+function ringPos(n,abs){const k=Math.floor(abs/13),m=abs%13,R0=GEO[n].R0;
+  if(m<=5)return P(n,k,R0+m+.5,-1);if(m===6)return P(n,k,R0+5.5,0);return P(n,k,R0+12-m+.5,1)}
+function yardCentre(n,k){const g=GEO[n],a=thetaOf(k,n)+Math.PI/n;return [50+g.u*g.yd*Math.cos(a),50+g.u*g.yd*Math.sin(a)]}
+function cellOf(n,col,p,i){
+  const k=sec(col),g=GEO[n],RING=13*n;
+  if(p<0){const [cx,cy]=yardCentre(n,k),o=g.u*(n===4?1.35:g.yr*.42);return [cx+(i%2?o:-o),cy+(i>1?o:-o)]}
+  if(p<=RING-2)return ringPos(n,(13*k+8+p)%RING);
+  if(p<RING+4)return P(n,k,g.R0+4-(p-(RING-1))+.5,0);
+  return P(n,k,g.R0*.5,0);
+}
+//GEO-END
+const svgCache={};
+function boardSVG(n){
+  if(svgCache[n])return svgCache[n];
+  const g=GEO[n],u=g.u,RING=13*n,f=v=>v.toFixed(2);
+  let s=`<svg id="bsvg" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect width="100" height="100" rx="3" fill="#fbf8f1"/>`;
+  for(let k=0;k<n;k++){ // yards
+    const H=HEX[COLORS[k]],[cx,cy]=yardCentre(n,k);
+    if(n===4){const w=6*u,q=4.2*u;
+      s+=`<rect x="${f(cx-w/2)}" y="${f(cy-w/2)}" width="${f(w)}" height="${f(w)}" rx="${f(u*.4)}" fill="${H}"/><rect x="${f(cx-q/2)}" y="${f(cy-q/2)}" width="${f(q)}" height="${f(q)}" rx="${f(u*.3)}" fill="#fff"/>`}
+    else s+=`<circle cx="${f(cx)}" cy="${f(cy)}" r="${f(u*g.yr)}" fill="${H}"/><circle cx="${f(cx)}" cy="${f(cy)}" r="${f(u*g.yr*.78)}" fill="#fff"/>`;
+    for(let i=0;i<4;i++){const [x,y]=cellOf(n,COLORS[k],-1,i);s+=`<circle cx="${f(x)}" cy="${f(y)}" r="${f(u*.5)}" fill="${H}" fill-opacity=".35"/>`}
+  }
+  const cell=(x,y,k,fill)=>{const w=u*.94;return `<rect x="${f(x-w/2)}" y="${f(y-w/2)}" width="${f(w)}" height="${f(w)}" rx="${f(u*.08)}" transform="rotate(${f(90+360*k/n)} ${f(x)} ${f(y)})" fill="${fill}" stroke="#333" stroke-width=".2"/>`};
+  for(let abs=0;abs<RING;abs++){const k=Math.floor(abs/13),m=abs%13,[x,y]=ringPos(n,abs);
+    s+=cell(x,y,k,m===8?HEX[COLORS[k]]:"#fff");
+    if(m===3)s+=`<text x="${f(x)}" y="${f(y)}" font-size="${f(u*.7)}" text-anchor="middle" dominant-baseline="central" fill="#666">★</text>`}
+  for(let k=0;k<n;k++)for(let i=0;i<5;i++){const [x,y]=P(n,k,g.R0+i+.5,0);s+=cell(x,y,k,HEX[COLORS[k]])}
+  const hr=g.R0/Math.cos(Math.PI/n);
+  for(let k=0;k<n;k++){const a=thetaOf(k,n),pts=[[50,50],...[-1,1].map(d=>[50+u*hr*Math.cos(a+d*Math.PI/n),50+u*hr*Math.sin(a+d*Math.PI/n)])];
+    s+=`<polygon points="${pts.map(p=>f(p[0])+","+f(p[1])).join(" ")}" fill="${HEX[COLORS[k]]}" stroke="#fff" stroke-width=".3"/>`}
+  return svgCache[n]=s+"</svg>";
 }
 function legal(col,d){return legalMoves(state,col,d)}
 const cur=()=>state.players[state.turn];
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 //LOGIC-START
-const MAXP=6,FINISH=58,RING_LAST=52,RING=54;
-const SEATS={2:[0,3],3:[0,2,4],4:[0,1,3,4],5:[0,1,2,3,4],6:[0,1,2,3,4,5]};
-const START=c=>9*COLORS.indexOf(c), isSafeAbs=a=>a%9===0||a%9===5;
+const MAXP=6;
+// board = classic cross (4 arms) for 2-4 players, 5 arms for 5 players, 6 arms for 6 players
+const SEATS={4:{2:[0,2],3:[0,1,3],4:[0,1,2,3]},5:{5:[0,1,2,3,4]},6:{6:[0,1,2,3,4,5]}};
+const ringOf=s=>13*s.arms,finOf=s=>13*s.arms+4;
+const START=c=>13*COLORS.indexOf(c)+8,isSafeAbs=a=>a%13===3||a%13===8;
 const cleanName=x=>String(x||"").slice(0,14).replace(/[<>&"]/g,"");
-function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,msg:""}}
-function legalMoves(s,col,d){const o=[];s.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=FINISH)o.push(i)});return o}
+function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,arms:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,msg:""}}
+function legalMoves(s,col,d){const o=[],f=finOf(s);s.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=f)o.push(i)});return o}
 function startGame(s){
-  s.players.forEach((p,i)=>p.color=COLORS[SEATS[s.players.length][i]]);
+  const n=s.players.length;s.arms=n<=4?4:n;const seats=SEATS[s.arms][n];
+  s.players.forEach((p,i)=>p.color=COLORS[seats[i]]);
   s.pos={};s.players.forEach(p=>s.pos[p.color]=[-1,-1,-1,-1]);
   s.status="play";s.turn=0;s.dice=null;s.msg="Roll the dice!";
 }
@@ -99,22 +129,22 @@ function applyAction(s,b){
       if(!member||s.status!=="play"||!s.dice||legalMoves(s,cur.color,s.dice).length||(b.v!==undefined&&b.v!==s.v))return {changed:false};
       s.dice=null;nextTurn(s);s.msg="";return {changed:true};
     case "move":{
-      const d=s.dice,i=b.i;
+      const d=s.dice,i=b.i,RING=ringOf(s),FIN=finOf(s);
       if(s.status!=="play"||cur.id!==b.pid||!d||!legalMoves(s,cur.color,d).includes(i))return {error:"Illegal move"};
       const p=s.pos[cur.color][i],np=p<0?0:p+d;s.pos[cur.color][i]=np;
       let cap=false,msg=`${cur.name} moved`;
-      if(np<=RING_LAST){
+      if(np<=RING-2){
         const abs=(START(cur.color)+np)%RING;
         if(!isSafeAbs(abs))for(const o of s.players){
           if(o.color===cur.color)continue;
-          s.pos[o.color]=s.pos[o.color].map(q=>(q>=0&&q<=RING_LAST&&(START(o.color)+q)%RING===abs)?(cap=true,-1):q);
+          s.pos[o.color]=s.pos[o.color].map(q=>(q>=0&&q<=RING-2&&(START(o.color)+q)%RING===abs)?(cap=true,-1):q);
         }
       }
       if(cap)msg=`${cur.name} captured a token! 💥`;
-      if(np===FINISH)msg=`${cur.name} got a token home 🏠`;
+      if(np===FIN)msg=`${cur.name} got a token home 🏠`;
       s.dice=null;s.msg=msg;
-      if(s.pos[cur.color].every(x=>x===FINISH)){s.status="done";s.msg=""}
-      else if(!(d===6||cap||np===FINISH))nextTurn(s);
+      if(s.pos[cur.color].every(x=>x===FIN)){s.status="done";s.msg=""}
+      else if(!(d===6||cap||np===FIN))nextTurn(s);
       return {changed:true};
     }
   }
@@ -237,23 +267,14 @@ function renderLobby(){
 }
 function renderGame(){
   const c=cur(),myTurn=c.id===me&&state.status==="play",mine=state.players.find(p=>p.id===me);
-  const act=state.players.map(p=>p.color);
-  let h=`<div class="card" style="padding:10px"><div id="board">`;
-  const put=(cls,x,y,st,txt)=>`<div class="${cls}" style="left:${x}%;top:${y}%;${st||""}">${txt||""}</div>`;
-  const stops=act.map((c,i)=>`${HEX[c]} ${i*100/act.length}% ${(i+1)*100/act.length}%`).join(",");
-  h+=put("hub",50,50,`background:conic-gradient(${stops})`);
-  for(const col of act){const k=sec(col),[x,y]=pt(27,ang(9*k+2.5));
-    h+=put("yd",x,y,`border-color:${HEX[col]};background:${HEX[col]}33`);
-    for(let i=1;i<=5;i++){const [a,b]=pt(RING_R-STEP*i,ang((9*k-2+N)%N));h+=put("c",a,b,`background:${HEX[col]}aa;border-color:${HEX[col]}`)}}
-  for(let j=0;j<N;j++){const [x,y]=pt(RING_R,ang(j)),col=COLORS[Math.floor(j/9)];
-    const st=(j%9===0&&act.includes(col))?`background:${HEX[col]};border-color:${HEX[col]}`:"";
-    h+=put("c",x,y,st,j%9===5?"★":(j%9===0&&!st?"•":""))}
+  const n=state.arms,g=GEO[n],tk=1.5*g.u;
+  let h=`<div class="card" style="padding:10px"><div id="board">${boardSVG(n)}`;
   const seen={},canMove=myTurn&&state.dice?legal(c.color,state.dice):null;
   for(const pl of state.players)state.pos[pl.color].forEach((p,i)=>{
-    const [x,y]=cellOf(pl.color,p,i),key=x.toFixed(1)+","+y.toFixed(1),k=seen[key]=(seen[key]||0)+1;
+    const [x,y]=cellOf(n,pl.color,p,i),key=x.toFixed(1)+","+y.toFixed(1),k=seen[key]=(seen[key]||0)+1;
     const go=canMove&&pl.id===me&&canMove.includes(i);
-    h+=`<div class="tok ${go?"go":""}" data-i="${i}" style="left:${x}%;top:${y}%;transform:translate(calc(-50% + ${(k-1)*2}px),calc(-50% + ${(k-1)*2}px))"><b style="background:${HEX[pl.color]}"></b></div>`});
-  const done=p=>state.pos[p.color].filter(x=>x===FINISH).length;
+    h+=`<div class="tok ${go?"go":""}" data-i="${i}" style="left:${x}%;top:${y}%;width:${tk}%;height:${tk}%;transform:translate(calc(-50% + ${(k-1)*2}px),calc(-50% + ${(k-1)*2}px))"><b style="background:${HEX[pl.color]}"></b></div>`});
+  const done=p=>state.pos[p.color].filter(x=>x===finOf(state)).length;
   h+=`</div></div><div class="card"><div class="row" style="justify-content:space-between">
     <div><div id="status">${state.status==="done"?"🏆 "+esc(c.name)+" wins!":myTurn?"Your turn":esc(c.name)+"'s turn"}</div><div class="sub" style="margin:2px 0 0">${state.status==="done"?`Back to the home screen in <b id="cd">8</b>s — the room code is free to reuse.`:esc(state.msg||"")}</div></div>
     <div class="row"><div id="dice">${state.dice?["","⚀","⚁","⚂","⚃","⚄","⚅"][state.dice]:"?"}</div>
