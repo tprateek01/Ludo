@@ -17,6 +17,8 @@ button.alt{background:var(--line);color:var(--ink)}button:disabled{opacity:.45;c
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .pl{display:flex;align-items:center;gap:8px;padding:5px 0}.dot{width:14px;height:14px;border-radius:50%;background:#aaa;flex:none}
 #board{position:relative;width:100%;aspect-ratio:1}
+#names{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+#names text{font-weight:800;fill:#222;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
 #bsvg{position:absolute;inset:0;width:100%;height:100%;border-radius:12px;box-shadow:0 2px 10px #0003}
 .tok{position:absolute;transition:left .35s,top .35s;display:flex;align-items:center;justify-content:center;z-index:5;pointer-events:none}
 .tok b{width:56%;height:56%;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1.5px #1b1b1b,0 3px 5px #0008,inset 0 -3px 5px #0004;transition:width .2s,height .2s}
@@ -78,6 +80,17 @@ function boardSVG(n){
     s+=`<polygon points="${pts.map(p=>f(p[0])+","+f(p[1])).join(" ")}" fill="${HEX[COLORS[k]]}" stroke="#fff" stroke-width=".3"/>`}
   return svgCache[n]=s+"</svg>";
 }
+function namesSVG(n,players){
+  const g=GEO[n],u=g.u,f=v=>v.toFixed(2);
+  const maxW=n===4?3.8*u:2*u*g.yr*.78*.85;
+  let s=`<svg id="names" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">`;
+  for(const p of players){
+    const [cx,cy]=yardCentre(n,sec(p.color)),nm=p.name||"";
+    const fs=Math.min(u*.95,maxW/(Math.max(nm.length,1)*.62));
+    s+=`<text x="${f(cx)}" y="${f(cy)}" font-size="${f(fs)}" text-anchor="middle" dominant-baseline="central"${p.left?' opacity=".45"':""}>${esc(nm)}</text>`;
+  }
+  return s+"</svg>";
+}
 function legal(col,d){return legalMoves(state,col,d)}
 const cur=()=>state.players[state.turn];
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -88,15 +101,15 @@ const SEATS={4:{2:[0,2],3:[0,1,3],4:[0,1,2,3]},5:{5:[0,1,2,3,4]},6:{6:[0,1,2,3,4
 const ringOf=s=>13*s.arms,finOf=s=>13*s.arms+4;
 const START=c=>13*COLORS.indexOf(c)+8,isSafeAbs=a=>a%13===3||a%13===8;
 const cleanName=x=>String(x||"").slice(0,14).replace(/[<>&"]/g,"");
-function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,arms:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,msg:""}}
-function legalMoves(s,col,d){const o=[],f=finOf(s);s.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=f)o.push(i)});return o}
+function newRoom(pid,name){return {v:1,gid:Math.random().toString(36).slice(2,8),status:"lobby",host:pid,max:4,arms:4,players:[{id:pid,name:cleanName(name)||"Player"}],pos:{},turn:0,dice:null,sixes:0,skip:false,msg:""}}
+function legalMoves(s,col,d){const o=[],f=finOf(s);if(s.skip)return o;s.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=f)o.push(i)});return o}
 function startGame(s){
   const n=s.players.length;s.arms=n<=4?4:n;const seats=SEATS[s.arms][n];
   s.players.forEach((p,i)=>p.color=COLORS[seats[i]]);
   s.pos={};s.players.forEach(p=>s.pos[p.color]=[-1,-1,-1,-1]);
-  s.status="play";s.turn=0;s.dice=null;s.msg="Roll the dice!";
+  s.status="play";s.turn=0;s.dice=null;s.sixes=0;s.skip=false;s.msg="Roll the dice!";
 }
-function nextTurn(s){const n=s.players.length;for(let k=0;k<n;k++){s.turn=(s.turn+1)%n;if(!s.players[s.turn].left)break}}
+function nextTurn(s){const n=s.players.length;s.sixes=0;s.skip=false;for(let k=0;k<n;k++){s.turn=(s.turn+1)%n;if(!s.players[s.turn].left)break}}
 function afterLeave(s){
   if(s.status!=="play")return;
   const alive=s.players.filter(p=>!p.left);
@@ -128,7 +141,11 @@ function applyAction(s,b){
     case "roll":{
       if(s.status!=="play"||cur.id!==b.pid||s.dice)return {error:"Not your roll"};
       const d=1+Math.floor(Math.random()*6);s.dice=d;
-      s.msg=legalMoves(s,cur.color,d).length?`${cur.name} rolled ${d}`:`${cur.name} rolled ${d} — no moves`;
+      if(!s.sixes)s.snap=[...s.pos[cur.color]]; // positions before this streak of sixes
+      s.sixes=d===6?(s.sixes||0)+1:0;
+      s.skip=s.sixes>=3;
+      if(s.skip&&s.snap)s.pos[cur.color]=[...s.snap]; // three 6s: undo moves made with this streak
+      s.msg=s.skip?`${cur.name} rolled three 6s in a row — moves undone, turn skipped`:legalMoves(s,cur.color,d).length?`${cur.name} rolled ${d}`:`${cur.name} rolled ${d} — no moves`;
       return {changed:true};
     }
     case "pass":
@@ -146,7 +163,7 @@ function applyAction(s,b){
           s.pos[o.color]=s.pos[o.color].map(q=>(q>=0&&q<=RING-2&&(START(o.color)+q)%RING===abs)?(cap=true,-1):q);
         }
       }
-      if(cap)msg=`${cur.name} captured a token! 💥`;
+      if(cap){msg=`${cur.name} captured a token! 💥`;s.sixes=0}
       if(np===FIN)msg=`${cur.name} got a token home 🏠`;
       s.dice=null;s.msg=msg;
       if(s.pos[cur.color].every(x=>x===FIN)){s.status="done";s.msg=""}
@@ -250,12 +267,23 @@ function render(){
   if(!state)return;
   if(!state.players.some(p=>p.id===me))return goHome("You are not in that room.");
   if(state.status==="lobby")return renderLobby();
-  renderGame();maybePass();if(state.status==="done")startExit();
+  renderGame();maybePass();maybeAuto();if(state.status==="done")startExit();
 }
 function maybePass(){
   if(state.status==="play"&&state.dice&&!legal(cur().color,state.dice).length&&passV!==state.v){
     passV=state.v;const v=state.v;
     setTimeout(()=>{if(state&&state.v===v)send({type:"pass",v})},1400)}
+}
+let autoV=-1;
+// If every legal move is equivalent (only one piece, or pieces sharing the same spot e.g. all in the yard), move automatically
+function maybeAuto(){
+  if(state.status!=="play"||!state.dice||cur().id!==me||autoV===state.v)return;
+  const mv=legal(cur().color,state.dice);
+  if(!mv.length)return;
+  const pos=state.pos[cur().color];
+  if(new Set(mv.map(i=>pos[i])).size!==1)return;
+  autoV=state.v;const v=state.v,i=mv[0];
+  setTimeout(()=>{if(state&&state.v===v)send({type:"move",i})},900);
 }
 function renderLobby(){
   const host=state.host===me,n=state.players.length,m=state.max;
@@ -286,7 +314,7 @@ const CLUSTER=[[0,0],[-1,-1],[1,1],[1,-1],[-1,1],[0,0]];
 function renderGame(){
   const c=cur(),myTurn=c.id===me&&state.status==="play";
   const n=state.arms,g=GEO[n],tk=1.5*g.u,u=g.u;
-  let h=`<div class="card" style="padding:10px"><div id="board">${boardSVG(n)}`;
+  let h=`<div class="card" style="padding:10px"><div id="board">${boardSVG(n)}${namesSVG(n,state.players)}`;
   const canMove=myTurn&&state.dice?legal(c.color,state.dice):null;
   // group pieces sharing a cell so they sit side by side instead of hiding each other
   const items=[],groups={};
@@ -301,9 +329,9 @@ function renderGame(){
     const off=cnt>1?CLUSTER[j%6]:[0,0],r=cnt>1?0.26*u:0;
     it.fx=it.x+off[0]*r;it.fy=it.y+off[1]*r;
     it.size=cnt===1?56:cnt===2?44:38;
-    it.go=canMove&&it.pl.id===me&&canMove.includes(it.i);
+    it.go=canMove&&it.pl.id===me&&canMove.includes(it.i)&&new Set(canMove.map(j=>state.pos[it.pl.color][j])).size>1;
     h+=`<div class="tok ${it.go?"go":""}" data-k="${it.pl.color}${it.i}" data-i="${it.i}" data-x="${it.fx}" data-y="${it.fy}" style="left:${it.fx}%;top:${it.fy}%;width:${tk}%;height:${tk}%;transform:translate(-50%,-50%)"><b style="width:${it.size}%;height:${it.size}%;background:radial-gradient(circle at 35% 30%,#ffffff99,#fff0 55%),${HEX[it.pl.color]}"></b></div>`});
-  const hint=state.status==="done"?"":myTurn?(state.dice?(canMove&&canMove.length?"Tap a glowing piece to move it":"No moves — skipping…"):"Tap the dice to roll!"):"";
+  const hint=state.status==="done"?"":myTurn?(state.dice?(state.skip?"Three 6s in a row — moves undone, turn skipped…":canMove&&canMove.length?(new Set(canMove.map(i=>state.pos[c.color][i])).size===1?"Moving automatically…":"Tap a glowing piece to move it"):"No moves — skipping…"):"Tap the dice to roll!"):"";
   const dieCls=`die${state.dice?"":" blank"}${myTurn&&!state.dice?" mine":""}`;
   h+=`</div></div><div class="card"><div class="row" style="justify-content:space-between;flex-wrap:nowrap">
     <div><div id="status">${state.status==="done"?"🏆 "+esc(c.name)+" wins!":myTurn?"Your turn":esc(c.name)+"'s turn"}</div>
