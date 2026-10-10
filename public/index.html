@@ -224,15 +224,7 @@ function hostAct(b,conn){
   if(conn&&b.type==="join"){conn.pid=b.pid;sess.conns.set(b.pid,conn)}
   if(r.changed)commit();
 }
-function enter(code){
-  room=code;main.innerHTML=`<div class="card">Connecting…</div>`;
-  const my={isHost:true,conns:new Map(),s:null,opened:false};sess=my;
-  const peer=new Peer(hostId(code),{debug:0});my.peer=peer;
-  const t=setTimeout(()=>{if(sess===my&&!my.opened)goHome("Could not reach the connection server. Check your internet and try again.")},12000);
-  peer.on("open",()=>{
-    if(sess!==my)return;my.opened=true;clearTimeout(t);
-    my.s=newRoom(me,nick);gid=null;localStorage.setItem("ludo-nick",nick);apply({state:my.s});
-  });
+function wireHost(my,peer){
   peer.on("connection",conn=>{
     conn.on("data",b=>{if(sess===my&&b&&b.type)hostAct(b,conn)});
     conn.on("close",()=>{
@@ -242,16 +234,53 @@ function enter(code){
     });
   });
   peer.on("disconnected",()=>{if(sess===my){try{peer.reconnect()}catch(e){}}});
+}
+// Host left/dropped mid-game: the next player in seat order takes over hosting; everyone else reconnects to them.
+function recover(code,old,elig,t0){
+  if(!state||state.status!=="play")return goHome();
+  if(Date.now()-t0>45000)return goHome("The host left and the game could not be continued.");
+  const rank=elig.indexOf(me);
+  if(rank<0)return goHome();
+  const retry=()=>setTimeout(()=>{if(state&&!sess)recover(code,old,elig,t0)},1500);
+  if(Date.now()-t0>=rank*6000)becomeHost(code,old,retry);else joinAsClient(code,true,retry);
+}
+function becomeHost(code,old,onFail){
+  const s0=JSON.parse(JSON.stringify(state));
+  const my={isHost:true,conns:new Map(),s:null,opened:false};sess=my;
+  const peer=new Peer(hostId(code),{debug:0});my.peer=peer;
+  const fail=()=>{if(sess!==my)return;sess=null;try{peer.destroy()}catch(e){}onFail()};
+  const t=setTimeout(()=>{if(!my.opened)fail()},8000);
+  wireHost(my,peer);
+  peer.on("open",()=>{
+    if(sess!==my)return;my.opened=true;clearTimeout(t);
+    s0.host=me;applyAction(s0,{type:"leave",pid:old});my.s=s0;commit();
+    // players who don't reconnect within 12s are treated as having left
+    setTimeout(()=>{if(sess!==my)return;let ch=false;
+      my.s.players.forEach(p=>{if(!p.left&&p.id!==me&&!my.conns.has(p.id)&&applyAction(my.s,{type:"leave",pid:p.id}).changed)ch=true});
+      if(ch)commit()},12000);
+  });
+  peer.on("error",e=>{if(sess===my&&!my.opened){clearTimeout(t);fail()}});
+}
+function enter(code){
+  room=code;main.innerHTML=`<div class="card">Connecting…</div>`;
+  const my={isHost:true,conns:new Map(),s:null,opened:false};sess=my;
+  const peer=new Peer(hostId(code),{debug:0});my.peer=peer;
+  const t=setTimeout(()=>{if(sess===my&&!my.opened)goHome("Could not reach the connection server. Check your internet and try again.")},12000);
+  peer.on("open",()=>{
+    if(sess!==my)return;my.opened=true;clearTimeout(t);
+    my.s=newRoom(me,nick);gid=null;localStorage.setItem("ludo-nick",nick);apply({state:my.s});
+  });
+  wireHost(my,peer);
   peer.on("error",e=>{
     if(sess!==my)return;
     if(e.type==="unavailable-id"){clearTimeout(t);try{peer.destroy()}catch(x){}joinAsClient(code)}
     else if(!my.opened){clearTimeout(t);goHome("Connection problem ("+e.type+"). Please try again.")}
   });
 }
-function joinAsClient(code,quiet){
-  room=code;main.innerHTML=`<div class="card">Joining room ${code}…</div>`;
+function joinAsClient(code,quiet,onFail){
+  room=code;if(!onFail)main.innerHTML=`<div class="card">Joining room ${code}…</div>`;
   const my={isHost:false,conn:null,got:false};sess=my;
-  const fail=m=>{if(sess===my)goHome(quiet?undefined:m)};
+  const fail=m=>{if(sess!==my)return;if(onFail){sess=null;try{my.peer.destroy()}catch(e){}onFail()}else goHome(quiet?undefined:m)};
   const t=setTimeout(()=>fail("Couldn't reach the room. Check the code and try again."),10000);
   const peer=new Peer({debug:0});my.peer=peer;
   peer.on("error",e=>{clearTimeout(t);fail(e.type==="peer-unavailable"?"Room not found — it may have ended.":"Connection problem ("+e.type+").")});
@@ -264,7 +293,12 @@ function joinAsClient(code,quiet){
       if(m.error){if(!my.got)fail(m.error);return}
       if(m.state){my.got=true;localStorage.setItem("ludo-room",code);localStorage.setItem("ludo-nick",nick);apply(m)}
     });
-    conn.on("close",()=>{if(sess!==my)return;if(state&&state.status==="done")return;fail("The host left, so the room closed.")});
+    conn.on("close",()=>{
+      if(sess!==my)return;if(state&&state.status==="done")return;
+      if(state&&state.status==="play"&&my.got){ // host gone mid-game: hand over to the next player
+        try{peer.destroy()}catch(e){}sess=null;
+        const o=state.host;recover(code,o,state.players.filter(p=>!p.left&&p.id!==o).map(p=>p.id),Date.now());return}
+      fail("The host left, so the room closed.")});
   });
 }
 function lobby(msg){
@@ -374,9 +408,9 @@ function renderGame(){
   document.querySelectorAll(".tok.go").forEach(t=>t.onclick=()=>send({type:"move",i:+t.dataset.i}));
   if($("#home"))$("#home").onclick=()=>goHome();
   if($("#leave"))$("#leave").onclick=()=>{
-    const host=sess&&sess.isHost;
-    if(!confirm(host?"You are the host — leaving ends the game for everyone. Leave?":"Leave the game? The other players will see that you left."))return;
-    if(host)goHome();else{send({type:"leave"});setTimeout(()=>goHome(),300)}
+    if(!confirm("Leave the game? The other players will see that you left and the game continues without you."))return;
+    if(sess&&sess.isHost){const r=applyAction(sess.s,{type:"leave",pid:me});if(r.changed)commit();setTimeout(()=>goHome(),700)}
+    else{send({type:"leave"});setTimeout(()=>goHome(),300)}
   };
 }
 (()=>{
