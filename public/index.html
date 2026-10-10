@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Ludo with Friends</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f4f1ea;--card:#fff;--ink:#222;--mut:#777;--line:#d9d4c7;--disc:#fbf8f1}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17181b;--card:#25272c;--ink:#eee;--mut:#9a9da5;--line:#3a3d44;--disc:#2e3037}}
+:root[data-theme="dark"]{--bg:#17181b;--card:#25272c;--ink:#eee;--mut:#9a9da5;--line:#3a3d44;--disc:#2e3037}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;justify-content:center}
+#app{width:100%;max-width:600px;padding:14px}
+h1{font-size:24px;margin:6px 0 2px}.sub{color:var(--mut);margin:0 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:12px}
+input{font:inherit;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);width:100%;margin:6px 0}
+button{font:inherit;font-weight:600;padding:10px 16px;border-radius:10px;border:0;background:#2b72d6;color:#fff;cursor:pointer}
+button.alt{background:var(--line);color:var(--ink)}button:disabled{opacity:.45;cursor:default}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.pl{display:flex;align-items:center;gap:8px;padding:5px 0}.dot{width:14px;height:14px;border-radius:50%;background:#aaa;flex:none}
+#board{position:relative;width:100%;aspect-ratio:1;border-radius:50%;background:var(--disc);border:2px solid var(--line)}
+.c,.yd,.hub{position:absolute;border-radius:50%;transform:translate(-50%,-50%)}
+.c{width:4.2%;height:4.2%;background:#fff;border:1px solid #aaa;display:flex;align-items:center;justify-content:center;font-size:9px;color:#888;line-height:1}
+.yd{width:17%;height:17%;border:2px dashed}
+.hub{width:22%;height:22%;border:2px solid var(--line)}
+.tok{position:absolute;width:7%;height:7%;transition:left .35s,top .35s;display:flex;align-items:center;justify-content:center;z-index:5;pointer-events:none}
+.tok b{width:63%;height:63%;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px #0008}
+.tok.go{pointer-events:auto;cursor:pointer;z-index:9}.tok.go b{animation:p .7s infinite alternate;outline:2px solid #000}
+@keyframes p{to{transform:scale(1.3)}}
+#dice{width:64px;height:64px;font-size:34px;background:#fff;color:#000;border:2px solid var(--ink);border-radius:12px;display:flex;align-items:center;justify-content:center}
+#status{font-weight:600}
+</style></head><body><div id="app"><h1>🎲 Ludo with Friends</h1><p class="sub">Online multiplayer · 2 to 6 players</p><div id="main">Loading…</div></div>
+<script>
+const N=54,COLORS=["red","green","yellow","blue","purple","orange"];
+const HEX={red:"#e5483f",green:"#2fa64a",yellow:"#f2b705",blue:"#2b72d6",purple:"#8e4fc9",orange:"#f08a24"};
+const RING_LAST=52,FINISH=58,RING_R=42,STEP=4.6;
+const ang=j=>(-90+j*360/N)*Math.PI/180;
+const pt=(r,a)=>[50+r*Math.cos(a),50+r*Math.sin(a)];
+const sec=c=>COLORS.indexOf(c), isSafe=j=>j%9===0||j%9===5;
+const $=s=>document.querySelector(s), main=$("#main");
+let me,room=null,state=null,nick="",ver=0,timer=null,passV=0;
+
+function cellOf(col,p,i){
+  const k=sec(col);
+  if(p<0){const [x,y]=pt(27,ang(9*k+2.5));return [x+(i%2?2.7:-2.7),y+(i>1?2.7:-2.7)]}
+  if(p<=RING_LAST)return pt(RING_R,ang((9*k+p)%N));
+  if(p<FINISH)return pt(RING_R-STEP*(p-RING_LAST),ang((9*k-2+N)%N));
+  return pt(6.5,ang(9*k+2.5));
+}
+function legal(col,d){const o=[];state.pos[col].forEach((p,i)=>{if(p<0?d===6:p+d<=FINISH)o.push(i)});return o}
+const cur=()=>state.players[state.turn];
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+async function api(body){const r=await fetch("/api/game",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body,room,pid:me})});return r.json()}
+let gid=null,exitG=null,exitI=null;
+const apply=r=>{if(r&&r.state){if(gid&&r.state.gid!==gid)return goHome();gid=r.state.gid;state=r.state;ver=state.v;render()}};
+function goHome(msg){
+  clearInterval(timer);clearInterval(exitI);exitG=null;gid=null;state=null;room=null;ver=0;
+  localStorage.removeItem("ludo-room");lobby(msg);
+}
+function startExit(){
+  if(exitG===state.gid)return;exitG=state.gid;let n=8;
+  exitI=setInterval(()=>{const el=$("#cd");if(el)el.textContent=--n;if(n<=0)goHome()},1000);
+}
+
+function lobby(msg){
+  main.innerHTML=`<div class="card"><label>Your nickname</label><input id="nn" maxlength="14" placeholder="e.g. Aman" value="${esc(nick)}">
+  <label style="display:block;margin-top:10px">Room code (1000 – 9999)</label>
+  <div class="row"><input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="e.g. 4821" style="flex:1;font-size:22px;letter-spacing:4px"><button id="rnd" class="alt" title="Random code">🎲</button></div>
+  <p class="sub" style="margin:6px 0 10px">Everyone who enters the same code lands in the same room. If nobody has used the code yet, you create the room and choose how many players (2–6).</p>
+  <button id="go" style="width:100%">Join / create room</button>
+  <p style="color:#e5483f;margin-bottom:0">${msg||""}</p></div>`;
+  const nm=()=>(nick=$("#nn").value.trim()||"Player");
+  $("#code").oninput=e=>e.target.value=e.target.value.replace(/\D/g,"").slice(0,4);
+  $("#rnd").onclick=()=>$("#code").value=1000+Math.floor(Math.random()*9000);
+  $("#go").onclick=()=>{nm();const c=$("#code").value.trim();/^[1-9]\d{3}$/.test(c)?open(c,"enter"):lobby("Enter a number from 1000 to 9999.")};
+}
+async function open(code,mode){
+  room=code;let r;
+  try{r=await api({type:mode||"join",name:nick})}catch(e){return lobby("Could not reach the server.")}
+  if(r.error){localStorage.removeItem("ludo-room");return lobby(r.error)}
+  room=r.room;localStorage.setItem("ludo-room",room);localStorage.setItem("ludo-nick",nick);
+  gid=null;apply(r);clearInterval(timer);
+  timer=setInterval(async()=>{
+    try{const x=await fetch("/api/game?room="+room+"&v="+ver,{cache:"no-store"});
+      if(x.status===404){clearInterval(timer);localStorage.removeItem("ludo-room");return lobby("Room expired.")}
+      apply(await x.json())}catch(e){}
+  },1000);
+}
+function render(){
+  if(!state)return;
+  if(!state.players.some(p=>p.id===me))return goHome("You are not in that room.");
+  if(state.status==="lobby")return renderLobby();
+  renderGame();maybePass();if(state.status==="done")startExit();
+}
+function maybePass(){
+  if(state.status==="play"&&state.dice&&!legal(cur().color,state.dice).length&&passV!==state.v){
+    passV=state.v;const v=state.v;
+    setTimeout(()=>{if(state&&state.v===v)api({type:"pass"}).then(apply)},1400)}
+}
+function renderLobby(){
+  const host=state.host===me,n=state.players.length,m=state.max;
+  main.innerHTML=`<div class="card"><div class="sub">Room code — share with friends</div>
+  <div style="font-size:40px;font-weight:800;letter-spacing:6px">${room}</div>
+  <div style="margin:10px 0">${state.players.map(p=>`<div class="pl"><span class="dot"></span>${esc(p.name)}${p.id===me?" (you)":""}${p.id===state.host?" 👑":""}</div>`).join("")}</div>
+  <p class="sub"><b>${n}/${m}</b> joined</p>
+  ${host?`<div class="sub" style="margin-bottom:6px">How many players in this game?</div>
+  <div class="row">${[2,3,4,5,6].map(k=>`<button data-m="${k}" class="${k===m?"":"alt"}" ${k<n?"disabled":""}>${k}</button>`).join("")}</div>
+  <p class="sub" style="margin-top:10px">The game starts automatically once ${m} players have joined. If fewer friends show up, lower the number to match.</p>`
+  :`<p class="sub">The host chose a <b>${m}-player</b> game. Starting when ${m-n} more ${m-n===1?"player joins":"players join"}…</p>`}
+  <button class="alt" id="lv" style="margin-top:6px">Leave</button></div>`;
+  document.querySelectorAll("[data-m]").forEach(b=>b.onclick=()=>api({type:"setmax",max:+b.dataset.m}).then(apply));
+  $("#lv").onclick=()=>goHome();
+}
+function renderGame(){
+  const c=cur(),myTurn=c.id===me&&state.status==="play",mine=state.players.find(p=>p.id===me);
+  const act=state.players.map(p=>p.color);
+  let h=`<div class="card" style="padding:10px"><div id="board">`;
+  const put=(cls,x,y,st,txt)=>`<div class="${cls}" style="left:${x}%;top:${y}%;${st||""}">${txt||""}</div>`;
+  const stops=act.map((c,i)=>`${HEX[c]} ${i*100/act.length}% ${(i+1)*100/act.length}%`).join(",");
+  h+=put("hub",50,50,`background:conic-gradient(${stops})`);
+  for(const col of act){const k=sec(col),[x,y]=pt(27,ang(9*k+2.5));
+    h+=put("yd",x,y,`border-color:${HEX[col]};background:${HEX[col]}33`);
+    for(let i=1;i<=5;i++){const [a,b]=pt(RING_R-STEP*i,ang((9*k-2+N)%N));h+=put("c",a,b,`background:${HEX[col]}aa;border-color:${HEX[col]}`)}}
+  for(let j=0;j<N;j++){const [x,y]=pt(RING_R,ang(j)),col=COLORS[Math.floor(j/9)];
+    const st=(j%9===0&&act.includes(col))?`background:${HEX[col]};border-color:${HEX[col]}`:"";
+    h+=put("c",x,y,st,j%9===5?"★":(j%9===0&&!st?"•":""))}
+  const seen={},canMove=myTurn&&state.dice?legal(c.color,state.dice):null;
+  for(const pl of state.players)state.pos[pl.color].forEach((p,i)=>{
+    const [x,y]=cellOf(pl.color,p,i),key=x.toFixed(1)+","+y.toFixed(1),k=seen[key]=(seen[key]||0)+1;
+    const go=canMove&&pl.id===me&&canMove.includes(i);
+    h+=`<div class="tok ${go?"go":""}" data-i="${i}" style="left:${x}%;top:${y}%;transform:translate(calc(-50% + ${(k-1)*2}px),calc(-50% + ${(k-1)*2}px))"><b style="background:${HEX[pl.color]}"></b></div>`});
+  const done=p=>state.pos[p.color].filter(x=>x===FINISH).length;
+  h+=`</div></div><div class="card"><div class="row" style="justify-content:space-between">
+    <div><div id="status">${state.status==="done"?"🏆 "+esc(c.name)+" wins!":myTurn?"Your turn":esc(c.name)+"'s turn"}</div><div class="sub" style="margin:2px 0 0">${state.status==="done"?`Back to the home screen in <b id="cd">8</b>s — the room code is free to reuse.`:esc(state.msg||"")}</div></div>
+    <div class="row"><div id="dice">${state.dice?["","⚀","⚁","⚂","⚃","⚄","⚅"][state.dice]:"?"}</div>
+    <button id="roll" ${myTurn&&!state.dice?"":"disabled"}>Roll</button></div></div>
+  <div style="margin-top:10px">${state.players.map(p=>`<span class="pl" style="display:inline-flex;margin-right:12px"><span class="dot" style="background:${HEX[p.color]}"></span>${esc(p.name)}${p.id===me?" (you)":""}${p.id===c.id&&state.status==="play"?" ◀":""} · ${done(p)}/4</span>`).join("")}</div>
+  <p class="sub" style="margin:8px 0 0">Room ${room} · roll a 6 to leave the yard · ★ and coloured start squares are safe</p></div>
+  ${state.status==="done"?`<button id="home">Back to home now</button>`:""}`;
+  main.innerHTML=h;
+  if($("#roll"))$("#roll").onclick=()=>api({type:"roll"}).then(apply);
+  document.querySelectorAll(".tok.go").forEach(t=>t.onclick=()=>api({type:"move",i:+t.dataset.i}).then(apply));
+  if($("#home"))$("#home").onclick=()=>goHome();
+}
+(()=>{
+  me=localStorage.getItem("ludo-pid");
+  if(!me){me=(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)+Date.now());localStorage.setItem("ludo-pid",me)}
+  nick=localStorage.getItem("ludo-nick")||"";
+  const saved=localStorage.getItem("ludo-room");
+  saved?open(saved,"join"):lobby();
+})();
+</script></body></html>
